@@ -196,7 +196,9 @@ void createGauge() {
   lv_obj_set_style_bg_color(label_digital, GAUGE_FACE_COLOR, 0);
   lv_obj_set_style_bg_opa(label_digital, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(label_digital, 0, 0);  // No border
-  lv_obj_set_style_pad_all(label_digital, 8, 0);
+  lv_obj_set_style_pad_all(label_digital, 4, 0);
+  lv_obj_set_width(label_digital, 76);  // Fixed width to prevent resize on digit change
+  lv_obj_set_style_text_align(label_digital, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_align(label_digital, LV_ALIGN_BOTTOM_MID, 0, -5);
 }
 

@@ -28,11 +28,12 @@ TFT_eSPI tft = TFT_eSPI();
 #define SCREEN_HEIGHT 240
 
 // 1990s Toyota MR2 color scheme - White Edition
-#define GAUGE_FACE_COLOR lv_color_hex(0x0000)      // Black
-#define GAUGE_TEXT_COLOR lv_color_hex(0xFFFF)      // White
-#define GAUGE_NEEDLE_COLOR lv_color_hex(0xFFFF)    // White
-#define GAUGE_WARNING_COLOR lv_color_hex(0xF800)   // Red
-#define GAUGE_ACCENT_COLOR lv_color_hex(0xFFFF)    // White
+#define GAUGE_FACE_COLOR lv_color_black()         // Black
+#define GAUGE_TEXT_COLOR lv_color_white()         // White
+#define GAUGE_NEEDLE_COLOR lv_color_white()       // White
+#define GAUGE_WARNING_COLOR lv_color_hex(0xF800)  // Red (low pressure)
+#define GAUGE_HIGH_WARN_COLOR lv_color_hex(0xFFE0) // Yellow (high pressure - RGB565)
+#define GAUGE_ACCENT_COLOR lv_color_white()       // White
 
 // LVGL display buffer
 static lv_disp_draw_buf_t draw_buf;
@@ -44,7 +45,8 @@ static lv_disp_drv_t disp_drv;
 static lv_obj_t *meter;
 static lv_meter_indicator_t *indic_needle;
 static lv_obj_t *label_digital;
-static lv_obj_t *label_oil_psi;
+static lv_obj_t *label_oil;
+static lv_obj_t *label_psi;
 
 // Gauge state
 float currentPressure = 0.0;
@@ -70,7 +72,8 @@ void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color
 
   tft.startWrite();
   tft.setAddrWindow(area->x1, area->y1, w, h);
-  tft.pushPixels((uint16_t *)&color_p->full, w * h);
+  // Cast LVGL color buffer directly to uint16_t array for TFT_eSPI
+  tft.pushColors((uint16_t *)color_p, w * h);
   tft.endWrite();
 
   lv_disp_flush_ready(disp);
@@ -150,20 +153,40 @@ void createGauge() {
   lv_meter_set_scale_major_ticks(meter, scale, 4, 3, 15, GAUGE_TEXT_COLOR, 14);  // Major tick every 20 PSI
   lv_meter_set_scale_range(meter, scale, 0, 80, 270, 135);
 
-  // Red warning arc (0-10 PSI)
-  lv_meter_indicator_t *indic_arc = lv_meter_add_arc(meter, scale, 6, GAUGE_WARNING_COLOR, 0);
-  lv_meter_set_indicator_start_value(meter, indic_arc, 0);
-  lv_meter_set_indicator_end_value(meter, indic_arc, OIL_PRESSURE_MIN_WARN);
+  // Red warning arc (0-10 PSI - LOW pressure)
+  lv_meter_indicator_t *indic_arc_low = lv_meter_add_arc(meter, scale, 6, GAUGE_WARNING_COLOR, 0);
+  lv_meter_set_indicator_start_value(meter, indic_arc_low, 0);
+  lv_meter_set_indicator_end_value(meter, indic_arc_low, OIL_PRESSURE_MIN_WARN);
 
-  // White needle
-  indic_needle = lv_meter_add_needle_line(meter, scale, 5, GAUGE_NEEDLE_COLOR, -10);
+  // Yellow warning arc (70-80 PSI - HIGH pressure)
+  lv_meter_indicator_t *indic_arc_high = lv_meter_add_arc(meter, scale, 6, GAUGE_HIGH_WARN_COLOR, 0);
+  lv_meter_set_indicator_start_value(meter, indic_arc_high, 70);
+  lv_meter_set_indicator_end_value(meter, indic_arc_high, 80);
 
-  // "OIL PSI" label above needle pivot point - LARGER for readability
-  label_oil_psi = lv_label_create(lv_scr_act());
-  lv_label_set_text(label_oil_psi, "OIL PSI");
-  lv_obj_set_style_text_color(label_oil_psi, GAUGE_ACCENT_COLOR, 0);
-  lv_obj_set_style_text_font(label_oil_psi, &lv_font_montserrat_22, 0);
-  lv_obj_align(label_oil_psi, LV_ALIGN_CENTER, 0, -35);
+  // Thin cyan needle for modern look
+  indic_needle = lv_meter_add_needle_line(meter, scale, 3, GAUGE_NEEDLE_COLOR, -10);
+
+  // Add center circle for needle pivot
+  lv_obj_t *center_circle = lv_obj_create(lv_scr_act());
+  lv_obj_set_size(center_circle, 16, 16);
+  lv_obj_set_style_radius(center_circle, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(center_circle, GAUGE_TEXT_COLOR, 0);
+  lv_obj_set_style_border_width(center_circle, 0, 0);
+  lv_obj_align(center_circle, LV_ALIGN_CENTER, 0, -5);
+
+  // Oil label above needle pivot point
+  label_oil = lv_label_create(lv_scr_act());
+  lv_label_set_text(label_oil, "Oil");
+  lv_obj_set_style_text_color(label_oil, GAUGE_ACCENT_COLOR, 0);
+  lv_obj_set_style_text_font(label_oil, &lv_font_montserrat_18, 0);
+  lv_obj_align(label_oil, LV_ALIGN_CENTER, 0, -35);
+
+  // "PSI" label underneath needle pivot point
+  label_psi = lv_label_create(lv_scr_act());
+  lv_label_set_text(label_psi, "PSI");
+  lv_obj_set_style_text_color(label_psi, GAUGE_ACCENT_COLOR, 0);
+  lv_obj_set_style_text_font(label_psi, &lv_font_montserrat_14, 0);
+  lv_obj_align(label_psi, LV_ALIGN_CENTER, 0, 15);
 
   // Extra large digital readout - MAXIMUM VISIBILITY (no border)
   label_digital = lv_label_create(lv_scr_act());
@@ -185,10 +208,15 @@ void updateGauge(float pressure) {
   snprintf(buf, sizeof(buf), "%d", (int)pressure);
   lv_label_set_text(label_digital, buf);
 
-  // Color coding
+  // Color coding for digital readout
   if (pressure < OIL_PRESSURE_MIN_WARN) {
+    // Low pressure warning - RED
     lv_obj_set_style_text_color(label_digital, GAUGE_WARNING_COLOR, 0);
+  } else if (pressure > 70) {
+    // High pressure warning - YELLOW
+    lv_obj_set_style_text_color(label_digital, GAUGE_HIGH_WARN_COLOR, 0);
   } else {
+    // Normal pressure - WHITE
     lv_obj_set_style_text_color(label_digital, GAUGE_NEEDLE_COLOR, 0);
   }
 }

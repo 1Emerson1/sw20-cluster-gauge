@@ -1,6 +1,6 @@
 # SW20 Cluster Gauge - 2GR-FE Oil Pressure Display
 
-ESP32-based oil pressure gauge using a GC9A01 1.28" circular display for Toyota 2GR-FE engine monitoring.
+ESP32-based oil pressure gauge using LVGL on a GC9A01 1.28" circular display for Toyota 2GR-FE engine monitoring.
 
 ## Hardware Components
 
@@ -69,23 +69,32 @@ Based on Toyota service manual specifications:
 | Normal operating range | 15-60 |
 | Cold start | 60-80 |
 
-### Gauge Color Zones
+### Gauge Display Design (1990s Toyota MR2 White Edition)
 
+**Visual Theme:**
+- Black background with white border
+- White needle, text, and tick marks
+- Red arc: 0-10 PSI (critical low)
+- Yellow arc: 70-80 PSI (high pressure warning)
+- 270° sweep (0-80 PSI range)
+
+**Digital Readout Color Coding:**
+- **WHITE** (10-70 PSI): Normal operating range
 - **RED** (< 10 PSI): Critical low pressure
-- **ORANGE** (10-15 PSI): Warning - below normal
-- **GREEN** (15-70 PSI): Normal operating range
 - **YELLOW** (> 70 PSI): High pressure (cold engine or high RPM)
 
 ## Features
 
-- ✅ Startup sweep animation
-- ✅ Color-coded pressure zones (red/orange/green/yellow)
+- ✅ LVGL-based UI for smooth graphics
+- ✅ 1990s Toyota MR2 White Edition styling (black/white theme)
+- ✅ Startup sweep animation with MR2 logo
+- ✅ Color-coded warning arcs (red: 0-10 PSI, yellow: 70-80 PSI)
 - ✅ Smooth needle animation with exponential smoothing
-- ✅ Digital readout with one decimal place
-- ✅ 270-degree gauge sweep (0-100 PSI)
-- ✅ Major tick marks every 10 PSI
+- ✅ Large digital readout (48pt) with color coding
+- ✅ 270-degree gauge sweep (0-80 PSI)
+- ✅ Major tick marks every 20 PSI
 - ✅ Minor tick marks every 5 PSI
-- ✅ Numbers displayed every 20 PSI
+- ✅ "Oil" label above center, "PSI" label below
 - ✅ Real-time serial monitoring
 - ✅ Simulated data mode for testing
 
@@ -96,14 +105,14 @@ Based on Toyota service manual specifications:
 The code includes a realistic simulation mode for testing without the physical sensor:
 
 ```cpp
-bool useSimulatedData = true;  // Line 44 in main.cpp
+bool useSimulatedData = true;  // Line 57 in main.cpp
 ```
 
 The simulation includes:
-- Cold start (high pressure ~55 PSI)
+- Cold start (high pressure ~60 PSI)
 - Warm-up period (pressure dropping)
-- Normal idle (~17 PSI with fluctuation)
-- Rev up/cruising (~40-45 PSI)
+- Hot idle (~11 PSI with fluctuation around 10-12 PSI)
+- Rev up/cruising (~45-50 PSI)
 - Rev down back to idle
 
 ### Switching to Real Sensor
@@ -112,7 +121,7 @@ When ready to use the real sensor:
 
 1. Wire the voltage divider circuit as shown above
 2. Connect sensor signal to GPIO34
-3. Change line 44 in main.cpp:
+3. Change line 57 in main.cpp:
    ```cpp
    bool useSimulatedData = false;
    ```
@@ -158,8 +167,8 @@ If readings seem off:
 2. **Verify sensor voltage** at different pressures:
    - 0 PSI should read ~0.5V
    - 100 PSI should read ~4.5V
-3. **Adjust voltage divider ratio** in code if using different resistors (lines 14-15)
-4. **Check ADC attenuation** setting (line 290) - should be `ADC_11db` for 0-3.3V range
+3. **Adjust voltage divider ratio** in code if using different resistors (lines 13-14)
+4. **Check ADC attenuation** setting (line 280) - should be `ADC_11db` for 0-3.3V range
 
 ## Troubleshooting
 
@@ -169,7 +178,7 @@ If readings seem off:
 | Readings always 0 | Check voltage divider, verify GPIO34 connection |
 | Erratic readings | Add 0.1µF capacitor between sensor signal and GND |
 | Pressure too high/low | Verify resistor values, check sensor voltage range |
-| Needle jumps around | Increase smoothing factor (line 347) or add hardware filter |
+| Needle jumps around | Increase smoothing factor (line 341) or add hardware filter |
 
 ## Future Enhancements
 
@@ -185,6 +194,7 @@ If readings seem off:
 - [2GR-FE Oil Pressure Specifications](https://wilhelmraceworks.com/blog/2gr-oil-pressure)
 - [Lowdoller Motorsports Sensor PN 7990100](https://lowdoller-motorsports.com/products/0-100-psi-5v-pressure-sensor)
 - [TFT_eSPI Library](https://github.com/Bodmer/TFT_eSPI)
+- [LVGL Graphics Library](https://github.com/lvgl/lvgl)
 
 ## License
 

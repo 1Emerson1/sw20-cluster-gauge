@@ -18,7 +18,7 @@
 #define LV_COLOR_DEPTH 16
 
 /* Swap the 2 bytes of RGB565 color. Useful if the display has an 8-bit interface (e.g. SPI)*/
-#define LV_COLOR_16_SWAP 0
+#define LV_COLOR_16_SWAP 1
 
 /* 1: Enable screen transparency. */
 #define LV_COLOR_SCREEN_TRANSP 0
@@ -99,7 +99,7 @@
 
 /* Montserrat fonts with ASCII range and some symbols */
 #define LV_FONT_MONTSERRAT_8  0
-#define LV_FONT_MONTSERRAT_10 0
+#define LV_FONT_MONTSERRAT_10 1
 #define LV_FONT_MONTSERRAT_12 1
 #define LV_FONT_MONTSERRAT_14 1
 #define LV_FONT_MONTSERRAT_16 1

@@ -7,7 +7,7 @@
 TFT_eSPI tft = TFT_eSPI();
 
 // Oil pressure sensor configuration
-#define OIL_PRESSURE_PIN 34  // GPIO34 - ADC1_CH6 (input only pin, good for ADC)
+#define OIL_PRESSURE_PIN 3  // GPIO3 - ADC1_CH2 (available on Waveshare ESP32-S3-LCD-1.28)
 
 // Voltage divider resistors (to scale 4.5V to 3.3V max)
 #define VOLTAGE_DIVIDER_R1 3900.0  // Ohms
@@ -22,6 +22,16 @@ TFT_eSPI tft = TFT_eSPI();
 #define OIL_PRESSURE_MIN_SAFE 8.0    // Below this = critical low
 #define OIL_PRESSURE_MIN_WARN 10.0   // Below this = warning (can idle at 10 PSI)
 #define OIL_PRESSURE_MAX_NORM 80.0   // Gauge maximum (high rpm/cold)
+
+// Headlight backlight dimming configuration
+#define HEADLIGHT_PIN 14       // GPIO14 - switched 12V via voltage divider
+#define BL_PIN 40              // GPIO40 - LCD backlight (TFT_BL)
+#define BL_BRIGHTNESS_DAY 255  // Full brightness (headlights off)
+#define BL_BRIGHTNESS_NIGHT 80 // Dimmed (headlights on)
+#define BL_FADE_DURATION 500   // Fade time in ms
+#define BL_PWM_CHANNEL 0
+#define BL_PWM_FREQ 5000
+#define BL_PWM_RESOLUTION 8
 
 // Display configuration
 #define SCREEN_WIDTH 240
@@ -57,6 +67,14 @@ unsigned long lastUpdateTime = 0;
 bool useSimulatedData = true;  // Set to false when using real sensor
 float simulatedPressure = 0.0;
 
+// Backlight fade state
+bool useSimulatedHeadlight = true;  // Set to false when using real headlight signal
+int currentBrightness = BL_BRIGHTNESS_DAY;
+int targetBrightness = BL_BRIGHTNESS_DAY;
+int fadeStartBrightness = BL_BRIGHTNESS_DAY;
+unsigned long fadeStartTime = 0;
+bool lastHeadlightState = false;
+
 // Function prototypes
 float readOilPressure();
 float getSimulatedPressure();
@@ -64,6 +82,7 @@ void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color
 void createGauge();
 void updateGauge(float pressure);
 void performStartupSweep();
+void updateBacklight();
 
 // LVGL display flush callback
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
@@ -270,6 +289,40 @@ void performStartupSweep() {
   Serial.println("Sweep complete!");
 }
 
+// Update backlight based on headlight state with fade transition
+void updateBacklight() {
+  bool headlightOn;
+
+  if (useSimulatedHeadlight) {
+    // Toggle every 10 seconds for testing
+    headlightOn = ((millis() / 10000) % 2) == 1;
+  } else {
+    headlightOn = digitalRead(HEADLIGHT_PIN) == HIGH;
+  }
+
+  // Detect state change
+  if (headlightOn != lastHeadlightState) {
+    lastHeadlightState = headlightOn;
+    fadeStartBrightness = currentBrightness;
+    targetBrightness = headlightOn ? BL_BRIGHTNESS_NIGHT : BL_BRIGHTNESS_DAY;
+    fadeStartTime = millis();
+    Serial.print("Headlights ");
+    Serial.println(headlightOn ? "ON - dimming" : "OFF - brightening");
+  }
+
+  // Apply fade
+  if (currentBrightness != targetBrightness) {
+    unsigned long elapsed = millis() - fadeStartTime;
+    if (elapsed >= BL_FADE_DURATION) {
+      currentBrightness = targetBrightness;
+    } else {
+      float progress = (float)elapsed / BL_FADE_DURATION;
+      currentBrightness = fadeStartBrightness + (int)((targetBrightness - fadeStartBrightness) * progress);
+    }
+    ledcWrite(BL_PWM_CHANNEL, currentBrightness);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -279,7 +332,7 @@ void setup() {
 
   pinMode(OIL_PRESSURE_PIN, INPUT);
   analogReadResolution(12);
-  analogSetAttenuation(ADC_11db);
+  analogSetAttenuation(ADC_11db);  // Full range 0-3.3V
 
   Serial.print("Initializing display...");
   tft.init();
@@ -291,6 +344,31 @@ void setup() {
 
   tft.fillScreen(TFT_BLACK);
   Serial.println("Done!");
+
+  // Headlight input pin (configure before reading)
+  pinMode(HEADLIGHT_PIN, INPUT_PULLDOWN);
+
+  // Read initial headlight state to handle car started with headlights on
+  bool headlightsOnAtBoot;
+  if (useSimulatedHeadlight) {
+    headlightsOnAtBoot = ((millis() / 10000) % 2) == 1;
+  } else {
+    headlightsOnAtBoot = digitalRead(HEADLIGHT_PIN) == HIGH;
+  }
+  lastHeadlightState = headlightsOnAtBoot;
+  int initialBrightness = headlightsOnAtBoot ? BL_BRIGHTNESS_NIGHT : BL_BRIGHTNESS_DAY;
+  currentBrightness = initialBrightness;
+  targetBrightness = initialBrightness;
+  fadeStartBrightness = initialBrightness;
+
+  // Configure backlight PWM (override TFT_eSPI digital output)
+  ledcSetup(BL_PWM_CHANNEL, BL_PWM_FREQ, BL_PWM_RESOLUTION);
+  ledcAttachPin(BL_PIN, BL_PWM_CHANNEL);
+  ledcWrite(BL_PWM_CHANNEL, initialBrightness);
+
+  if (headlightsOnAtBoot) {
+    Serial.println("Headlights detected ON at boot - starting dimmed");
+  }
 
   Serial.print("Initializing LVGL...");
   lv_init();
@@ -332,6 +410,9 @@ void loop() {
 
   // Update LVGL timer
   lv_timer_handler();
+
+  // Update backlight based on headlight state
+  updateBacklight();
 
   // Read pressure every 100ms
   if (currentTime - lastUpdateTime >= 100) {

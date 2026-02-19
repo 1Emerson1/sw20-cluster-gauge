@@ -27,6 +27,13 @@
 #define LV_COLOR_CHROMA_KEY lv_color_hex(0x00ff00)         /*pure green*/
 
 /*=========================
+   DRAWING
+ *=========================*/
+
+/* 1: Enable anti-aliasing (smoother lines and curves) */
+#define LV_ANTIALIAS 1
+
+/*=========================
    MEMORY SETTINGS
  *=========================*/
 

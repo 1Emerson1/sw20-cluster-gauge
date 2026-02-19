@@ -2,36 +2,25 @@
 #include <TFT_eSPI.h>
 #include <SPI.h>
 #include <lvgl.h>
-
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include "gauge_config.h"
+#include "web_config_html.h"
 
 // Create display object (pins configured in platformio.ini)
 TFT_eSPI tft = TFT_eSPI();
 
-// Oil pressure sensor configuration
+// Runtime configuration (loaded from NVS at boot)
+GaugeConfig cfg;
+WebServer server(80);
+Preferences prefs;
+bool wifiReady = false;
+
+// Hardware pin assignments (not configurable)
 #define OIL_PRESSURE_PIN 3  // GPIO3 - ADC1_CH2
-
-// Voltage divider resistors (to scale 4.5V to 3.3V max)
-#define VOLTAGE_DIVIDER_R1 3900.0  // Ohms
-#define VOLTAGE_DIVIDER_R2 10000.0 // Ohms
-
-// Sensor voltage range (Lowdoller 7990100 specifications)
-#define SENSOR_MIN_VOLTAGE 0.5  // 0 PSI
-#define SENSOR_MAX_VOLTAGE 4.5  // 100 PSI
-#define SENSOR_MAX_PSI 100.0
-
-// 2GR-FE oil pressure specifications
-#define OIL_PRESSURE_MIN_SAFE 8.0
-#define OIL_PRESSURE_MIN_WARN 10.0
-
-// Temperature thresholds
-#define TEMP_WARNING_HIGH 110.0
-
-// Headlight backlight dimming configuration
 #define HEADLIGHT_PIN 14
 #define BL_PIN 40
-#define BL_BRIGHTNESS_DAY 255
-#define BL_BRIGHTNESS_NIGHT 80
-#define BL_FADE_DURATION 500
 #define BL_PWM_CHANNEL 0
 #define BL_PWM_FREQ 5000
 #define BL_PWM_RESOLUTION 8
@@ -70,16 +59,13 @@ float displayTemp = 0.0;
 unsigned long lastUpdateTime = 0;
 
 // Simulated data for testing
-bool useSimulatedData = true;
-bool useSimulatedTemp = true;
 float simulatedPressure = 0.0;
 float simulatedTemp = 0.0;
 
 // Backlight fade state
-bool useSimulatedHeadlight = true;
-int currentBrightness = BL_BRIGHTNESS_DAY;
-int targetBrightness = BL_BRIGHTNESS_DAY;
-int fadeStartBrightness = BL_BRIGHTNESS_DAY;
+int currentBrightness = 255;
+int targetBrightness = 255;
+int fadeStartBrightness = 255;
 unsigned long fadeStartTime = 0;
 bool lastHeadlightState = false;
 
@@ -93,6 +79,15 @@ void createGauge();
 void updateGauge(float pressure, float temp);
 void performStartup();
 void updateBacklight();
+void loadConfigFromNVS();
+void saveConfigToNVS();
+void resetConfigToDefaults();
+void initWiFiAP();
+String buildConfigPage();
+void handleRoot();
+void handleSave();
+void handleReset();
+void handleNotFound();
 
 // LVGL display flush callback
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
@@ -109,7 +104,7 @@ void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color
 
 // Read oil pressure from sensor
 float readOilPressure() {
-  if (useSimulatedData) {
+  if (cfg.useSimulatedData) {
     return getSimulatedPressure();
   }
 
@@ -120,18 +115,18 @@ float readOilPressure() {
   }
   float adcValue = adcSum / 10.0;
   float measuredVoltage = adcValue * 3.3 / 4095.0;
-  float sensorVoltage = measuredVoltage * (VOLTAGE_DIVIDER_R1 + VOLTAGE_DIVIDER_R2) / VOLTAGE_DIVIDER_R2;
-  float pressure = (sensorVoltage - SENSOR_MIN_VOLTAGE) / (SENSOR_MAX_VOLTAGE - SENSOR_MIN_VOLTAGE) * SENSOR_MAX_PSI;
+  float sensorVoltage = measuredVoltage * (cfg.voltageDividerR1 + cfg.voltageDividerR2) / cfg.voltageDividerR2;
+  float pressure = (sensorVoltage - cfg.sensorMinVoltage) / (cfg.sensorMaxVoltage - cfg.sensorMinVoltage) * cfg.sensorMaxPsi;
 
   if (pressure < 0) pressure = 0;
-  if (pressure > SENSOR_MAX_PSI) pressure = SENSOR_MAX_PSI;
+  if (pressure > cfg.sensorMaxPsi) pressure = cfg.sensorMaxPsi;
 
   return pressure;
 }
 
 // Read coolant temperature (placeholder for real sensor)
 float readCoolantTemp() {
-  if (useSimulatedTemp) {
+  if (cfg.useSimulatedTemp) {
     return getSimulatedTemp();
   }
   return 0.0;
@@ -222,14 +217,14 @@ void createGauge() {
   lv_obj_set_style_bg_color(meter, COLOR_WARNING, LV_PART_INDICATOR);
   lv_obj_set_style_bg_opa(meter, LV_OPA_COVER, LV_PART_INDICATOR);
 
-  // "OIL TEMP" label (inside gauge, upper area)
+  // "TEMP" label (inside gauge, upper area)
   label_oil_temp = lv_label_create(lv_scr_act());
   lv_label_set_text(label_oil_temp, "TEMP");
   lv_obj_set_style_text_font(label_oil_temp, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_color(label_oil_temp, COLOR_WHITE, 0);
   lv_obj_align(label_oil_temp, LV_ALIGN_CENTER, 0, -35);
 
-  // "OIL PRESS" label (below center)
+  // "PRESSURE" label (below center)
   label_oil_press = lv_label_create(lv_scr_act());
   lv_label_set_text(label_oil_press, "PRESSURE");
   lv_obj_set_style_text_font(label_oil_press, &lv_font_montserrat_12, 0);
@@ -286,7 +281,7 @@ void performStartup() {
 void updateBacklight() {
   bool headlightOn;
 
-  if (useSimulatedHeadlight) {
+  if (cfg.useSimulatedHeadlight) {
     headlightOn = ((millis() / 10000) % 2) == 1;
   } else {
     headlightOn = digitalRead(HEADLIGHT_PIN) == HIGH;
@@ -295,7 +290,7 @@ void updateBacklight() {
   if (headlightOn != lastHeadlightState) {
     lastHeadlightState = headlightOn;
     fadeStartBrightness = currentBrightness;
-    targetBrightness = headlightOn ? BL_BRIGHTNESS_NIGHT : BL_BRIGHTNESS_DAY;
+    targetBrightness = headlightOn ? cfg.blBrightnessNight : cfg.blBrightnessDay;
     fadeStartTime = millis();
     Serial.print("Headlights ");
     Serial.println(headlightOn ? "ON - dimming" : "OFF - brightening");
@@ -303,14 +298,195 @@ void updateBacklight() {
 
   if (currentBrightness != targetBrightness) {
     unsigned long elapsed = millis() - fadeStartTime;
-    if (elapsed >= BL_FADE_DURATION) {
+    if (elapsed >= (unsigned long)cfg.blFadeDuration) {
       currentBrightness = targetBrightness;
     } else {
-      float progress = (float)elapsed / BL_FADE_DURATION;
+      float progress = (float)elapsed / cfg.blFadeDuration;
       currentBrightness = fadeStartBrightness + (int)((targetBrightness - fadeStartBrightness) * progress);
     }
     ledcWrite(BL_PWM_CHANNEL, currentBrightness);
   }
+}
+
+// --- NVS Configuration ---
+
+void loadConfigFromNVS() {
+  prefs.begin(NVS_NAMESPACE, true);  // read-only
+  cfg.useSimulatedData    = prefs.getBool(KEY_SIM_DATA,   DEFAULT_USE_SIMULATED_DATA);
+  cfg.useSimulatedTemp    = prefs.getBool(KEY_SIM_TEMP,   DEFAULT_USE_SIMULATED_TEMP);
+  cfg.useSimulatedHeadlight = prefs.getBool(KEY_SIM_HL,   DEFAULT_USE_SIMULATED_HEADLIGHT);
+  cfg.sensorMinVoltage    = prefs.getFloat(KEY_SENS_MIN_V, DEFAULT_SENSOR_MIN_VOLTAGE);
+  cfg.sensorMaxVoltage    = prefs.getFloat(KEY_SENS_MAX_V, DEFAULT_SENSOR_MAX_VOLTAGE);
+  cfg.sensorMaxPsi        = prefs.getFloat(KEY_SENS_MAX_P, DEFAULT_SENSOR_MAX_PSI);
+  cfg.voltageDividerR1    = prefs.getFloat(KEY_VD_R1,     DEFAULT_VOLTAGE_DIVIDER_R1);
+  cfg.voltageDividerR2    = prefs.getFloat(KEY_VD_R2,     DEFAULT_VOLTAGE_DIVIDER_R2);
+  cfg.oilPressureMinSafe  = prefs.getFloat(KEY_OIL_SAFE,  DEFAULT_OIL_PRESSURE_MIN_SAFE);
+  cfg.oilPressureMinWarn  = prefs.getFloat(KEY_OIL_WARN,  DEFAULT_OIL_PRESSURE_MIN_WARN);
+  cfg.tempWarningHigh     = prefs.getFloat(KEY_TEMP_WARN, DEFAULT_TEMP_WARNING_HIGH);
+  cfg.blBrightnessDay     = prefs.getInt(KEY_BL_DAY,      DEFAULT_BL_BRIGHTNESS_DAY);
+  cfg.blBrightnessNight   = prefs.getInt(KEY_BL_NIGHT,    DEFAULT_BL_BRIGHTNESS_NIGHT);
+  cfg.blFadeDuration      = prefs.getInt(KEY_BL_FADE,     DEFAULT_BL_FADE_DURATION);
+  cfg.emaAlpha            = prefs.getFloat(KEY_EMA_ALPHA,  DEFAULT_EMA_ALPHA);
+  prefs.end();
+  Serial.println("Config loaded from NVS");
+}
+
+void saveConfigToNVS() {
+  prefs.begin(NVS_NAMESPACE, false);  // read-write
+  prefs.putBool(KEY_SIM_DATA,   cfg.useSimulatedData);
+  prefs.putBool(KEY_SIM_TEMP,   cfg.useSimulatedTemp);
+  prefs.putBool(KEY_SIM_HL,     cfg.useSimulatedHeadlight);
+  prefs.putFloat(KEY_SENS_MIN_V, cfg.sensorMinVoltage);
+  prefs.putFloat(KEY_SENS_MAX_V, cfg.sensorMaxVoltage);
+  prefs.putFloat(KEY_SENS_MAX_P, cfg.sensorMaxPsi);
+  prefs.putFloat(KEY_VD_R1,     cfg.voltageDividerR1);
+  prefs.putFloat(KEY_VD_R2,     cfg.voltageDividerR2);
+  prefs.putFloat(KEY_OIL_SAFE,  cfg.oilPressureMinSafe);
+  prefs.putFloat(KEY_OIL_WARN,  cfg.oilPressureMinWarn);
+  prefs.putFloat(KEY_TEMP_WARN, cfg.tempWarningHigh);
+  prefs.putInt(KEY_BL_DAY,      cfg.blBrightnessDay);
+  prefs.putInt(KEY_BL_NIGHT,    cfg.blBrightnessNight);
+  prefs.putInt(KEY_BL_FADE,     cfg.blFadeDuration);
+  prefs.putFloat(KEY_EMA_ALPHA,  cfg.emaAlpha);
+  prefs.end();
+  Serial.println("Config saved to NVS");
+}
+
+void resetConfigToDefaults() {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.clear();
+  prefs.end();
+  loadConfigFromNVS();  // Reloads with compiled defaults
+  Serial.println("Config reset to defaults");
+}
+
+// --- WiFi AP & Web Server ---
+
+void initWiFiAP() {
+  WiFi.mode(WIFI_AP);
+  IPAddress local_ip(192, 168, 4, 1);
+  IPAddress gateway(192, 168, 4, 1);
+  IPAddress subnet(255, 255, 255, 0);
+  WiFi.softAPConfig(local_ip, gateway, subnet);
+
+  if (!WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, WIFI_AP_CHANNEL, 0, WIFI_AP_MAX_CONN)) {
+    Serial.println("WiFi AP failed to start — gauge running without web config");
+    WiFi.mode(WIFI_OFF);
+    wifiReady = false;
+    return;
+  }
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/save", HTTP_POST, handleSave);
+  server.on("/reset", HTTP_POST, handleReset);
+  server.onNotFound(handleNotFound);
+  server.begin();
+  wifiReady = true;
+
+  Serial.print("WiFi AP started: ");
+  Serial.println(WIFI_AP_SSID);
+  Serial.print("Config URL: http://");
+  Serial.println(WiFi.softAPIP());
+}
+
+String buildConfigPage() {
+  String html = FPSTR(PAGE_HTML);
+
+  // Simulation checkboxes
+  html.replace("%SIM_DATA%", cfg.useSimulatedData ? "checked" : "");
+  html.replace("%SIM_TEMP%", cfg.useSimulatedTemp ? "checked" : "");
+  html.replace("%SIM_HL%",   cfg.useSimulatedHeadlight ? "checked" : "");
+
+  // Sensor calibration
+  html.replace("%SENS_MIN_V%", String(cfg.sensorMinVoltage, 2));
+  html.replace("%SENS_MAX_V%", String(cfg.sensorMaxVoltage, 2));
+  html.replace("%SENS_MAX_P%", String(cfg.sensorMaxPsi, 1));
+  html.replace("%VD_R1%",      String((int)cfg.voltageDividerR1));
+  html.replace("%VD_R2%",      String((int)cfg.voltageDividerR2));
+
+  // Safety thresholds
+  html.replace("%OIL_SAFE%",  String(cfg.oilPressureMinSafe, 1));
+  html.replace("%OIL_WARN%",  String(cfg.oilPressureMinWarn, 1));
+  html.replace("%TEMP_WARN%", String(cfg.tempWarningHigh, 1));
+
+  // Backlight
+  html.replace("%BL_DAY%",   String(cfg.blBrightnessDay));
+  html.replace("%BL_NIGHT%", String(cfg.blBrightnessNight));
+  html.replace("%BL_FADE%",  String(cfg.blFadeDuration));
+
+  // Display
+  html.replace("%EMA_ALPHA%", String(cfg.emaAlpha, 2));
+
+  return html;
+}
+
+void handleRoot() {
+  server.send(200, "text/html", buildConfigPage());
+}
+
+void handleSave() {
+  // Simulation toggles (unchecked checkboxes are absent from POST)
+  cfg.useSimulatedData      = server.hasArg("simData");
+  cfg.useSimulatedTemp      = server.hasArg("simTemp");
+  cfg.useSimulatedHeadlight = server.hasArg("simHL");
+
+  // Sensor calibration
+  if (server.hasArg("sensMinV")) cfg.sensorMinVoltage = server.arg("sensMinV").toFloat();
+  if (server.hasArg("sensMaxV")) cfg.sensorMaxVoltage = server.arg("sensMaxV").toFloat();
+  if (server.hasArg("sensMaxP")) cfg.sensorMaxPsi     = server.arg("sensMaxP").toFloat();
+  if (server.hasArg("vdR1"))     cfg.voltageDividerR1  = server.arg("vdR1").toFloat();
+  if (server.hasArg("vdR2"))     cfg.voltageDividerR2  = server.arg("vdR2").toFloat();
+
+  // Safety thresholds
+  if (server.hasArg("oilSafe")) cfg.oilPressureMinSafe = server.arg("oilSafe").toFloat();
+  if (server.hasArg("oilWarn")) cfg.oilPressureMinWarn = server.arg("oilWarn").toFloat();
+  if (server.hasArg("tempWarn")) cfg.tempWarningHigh   = server.arg("tempWarn").toFloat();
+
+  // Backlight
+  if (server.hasArg("blDay"))   cfg.blBrightnessDay   = server.arg("blDay").toInt();
+  if (server.hasArg("blNight")) cfg.blBrightnessNight  = server.arg("blNight").toInt();
+  if (server.hasArg("blFade"))  cfg.blFadeDuration     = server.arg("blFade").toInt();
+
+  // Display
+  if (server.hasArg("emaAlpha")) cfg.emaAlpha = server.arg("emaAlpha").toFloat();
+
+  // Validate and constrain values
+  if (cfg.voltageDividerR2 <= 0) cfg.voltageDividerR2 = DEFAULT_VOLTAGE_DIVIDER_R2;
+  if (cfg.sensorMinVoltage >= cfg.sensorMaxVoltage) {
+    cfg.sensorMinVoltage = DEFAULT_SENSOR_MIN_VOLTAGE;
+    cfg.sensorMaxVoltage = DEFAULT_SENSOR_MAX_VOLTAGE;
+  }
+  cfg.blBrightnessDay   = constrain(cfg.blBrightnessDay, 0, 255);
+  cfg.blBrightnessNight = constrain(cfg.blBrightnessNight, 0, 255);
+  cfg.blFadeDuration    = constrain(cfg.blFadeDuration, 0, 5000);
+  cfg.emaAlpha          = constrain(cfg.emaAlpha, 0.01f, 1.0f);
+
+  saveConfigToNVS();
+
+  // Apply backlight immediately
+  targetBrightness = lastHeadlightState ? cfg.blBrightnessNight : cfg.blBrightnessDay;
+  fadeStartBrightness = currentBrightness;
+  fadeStartTime = millis();
+
+  server.sendHeader("Location", "/?saved=1");
+  server.send(303);
+}
+
+void handleReset() {
+  resetConfigToDefaults();
+
+  // Apply backlight immediately
+  targetBrightness = lastHeadlightState ? cfg.blBrightnessNight : cfg.blBrightnessDay;
+  fadeStartBrightness = currentBrightness;
+  fadeStartTime = millis();
+
+  server.sendHeader("Location", "/?reset=1");
+  server.send(303);
+}
+
+void handleNotFound() {
+  server.sendHeader("Location", "/");
+  server.send(302);
 }
 
 void setup() {
@@ -319,6 +495,9 @@ void setup() {
 
   Serial.println("\n\n2GR-FE Dual Gauge (Oil + Temp)");
   Serial.println("==============================");
+
+  // Load configuration from NVS (or defaults on first boot)
+  loadConfigFromNVS();
 
   pinMode(OIL_PRESSURE_PIN, INPUT);
   analogReadResolution(12);
@@ -338,13 +517,13 @@ void setup() {
   pinMode(HEADLIGHT_PIN, INPUT_PULLDOWN);
 
   bool headlightsOnAtBoot;
-  if (useSimulatedHeadlight) {
+  if (cfg.useSimulatedHeadlight) {
     headlightsOnAtBoot = ((millis() / 10000) % 2) == 1;
   } else {
     headlightsOnAtBoot = digitalRead(HEADLIGHT_PIN) == HIGH;
   }
   lastHeadlightState = headlightsOnAtBoot;
-  int initialBrightness = headlightsOnAtBoot ? BL_BRIGHTNESS_NIGHT : BL_BRIGHTNESS_DAY;
+  int initialBrightness = headlightsOnAtBoot ? cfg.blBrightnessNight : cfg.blBrightnessDay;
   currentBrightness = initialBrightness;
   targetBrightness = initialBrightness;
   fadeStartBrightness = initialBrightness;
@@ -364,12 +543,16 @@ void setup() {
 
   lv_obj_set_style_bg_color(lv_scr_act(), COLOR_BLACK, 0);
 
+  // Gauge renders first — WiFi starts after
   performStartup();
 
   lastUpdateTime = millis();
 
-  if (useSimulatedData) Serial.println("*** SIMULATED OIL PRESSURE ***");
-  if (useSimulatedTemp) Serial.println("*** SIMULATED TEMPERATURE ***");
+  if (cfg.useSimulatedData) Serial.println("*** SIMULATED OIL PRESSURE ***");
+  if (cfg.useSimulatedTemp) Serial.println("*** SIMULATED TEMPERATURE ***");
+
+  // Start WiFi AP and web server (non-critical, gauge already visible)
+  initWiFiAP();
 }
 
 void loop() {
@@ -382,6 +565,10 @@ void loop() {
   lv_timer_handler();
   updateBacklight();
 
+  if (wifiReady) {
+    server.handleClient();
+  }
+
   if (currentTime - lastUpdateTime >= 100) {
     lastUpdateTime = currentTime;
 
@@ -389,7 +576,7 @@ void loop() {
     currentTemp = readCoolantTemp();
 
     // EMA smoothing
-    float alpha = 0.15;
+    float alpha = cfg.emaAlpha;
     displayPressure = displayPressure * (1 - alpha) + currentPressure * alpha;
     displayTemp = displayTemp * (1 - alpha) + currentTemp * alpha;
 
